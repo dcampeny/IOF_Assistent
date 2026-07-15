@@ -13,6 +13,9 @@ punts d'aigua, elements singulars i inventaris forestals), i exportar el
 fitxer `.txt` per a la importació a PDF segons les normes de redacció del
 CPF.
 
+**Compatibilitat:** QGIS 3.x (Qt5) i QGIS 4.x (Qt6). Verificat amb
+l'escàner oficial de compatibilitat Qt6 de plugins.qgis.org — 0 incidències.
+
 ## Format de sortida
 
 Cada registre segueix l'estructura:
@@ -116,6 +119,12 @@ Ordre de treball recomanat:
 Aquests problemes de digitalització/geometria es van detectar i corregir el
 juliol de 2026. Es documenten aquí per si tornen a aparèixer amb dades noves:
 
+- **Compatibilitat total amb Qt6 (QGIS 4.x)**: totes les enumeracions de
+  PyQGIS s'han convertit al format amb àmbit (p. ex. `Qgis.MessageLevel.Info`
+  en lloc de `Qgis.Info`, `QgsWkbTypes.GeometryType.PolygonGeometry` en lloc
+  de `QgsWkbTypes.PolygonGeometry`), vàlid tant a QGIS 3.x (Qt5) com a
+  QGIS 4.x (Qt6). Verificat amb l'escàner oficial de compatibilitat Qt6 de
+  plugins.qgis.org: **0 incidències**.
 - **Divisió d'unitats d'actuació fallava sense motiu clar**: els codis
   d'error de `splitGeometry()` han canviat en versions modernes de QGIS
   (ja no són els 0/1/2 de QGIS 3.4). Corregit perquè el registre mostri el
