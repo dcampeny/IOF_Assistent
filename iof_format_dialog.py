@@ -848,7 +848,7 @@ def apply_unitats_style(layer):
     # Capa auxiliar de límits de rodal/UA (dissolta per codi_field)
     # ------------------------------------------------------------------ #
     # El contorn gruixut de ratlla-punt només ha d'aparèixer entre
-    # unitats amb un rodal/UA DIFERENT — mai entre unitats de vegetació
+    # unitats amb un rodal/UA DIFERENT — mai entre tipologies forestals
     # que en comparteixen el número. Com que QGIS estilitza cada polígon
     # sencer, no cada costat per separat, no es pot expressar amb una
     # regla per feature (una unitat pot tenir una veïna del mateix rodal
@@ -2239,7 +2239,7 @@ class FormatLayersDialog(QDialog):
                     return
 
                 # Avisar (sense bloquejar del tot) si hi ha finques amb
-                # unitats de vegetació encara incompletes: una finca
+                # tipologies forestals encara incompletes: una finca
                 # sense cap unitat que la cobreixi es renderitza igual
                 # que una àrea exclosa de l'IOF, i pot confondre's amb
                 # una exclusió real si no s'avisa.
@@ -2262,7 +2262,7 @@ class FormatLayersDialog(QDialog):
                             noms = ", ".join(str(f.id()) for f in incompletes)
                         resposta = QMessageBox.question(
                             self, "Unitats incompletes",
-                            f"Hi ha finques sense unitats de vegetació "
+                            f"Hi ha finques sense tipologies forestals "
                             f"completes: {noms}.\n\n"
                             "Aquestes àrees es renderitzaran igual que "
                             "les zones excloses de l'IOF.\n\n"

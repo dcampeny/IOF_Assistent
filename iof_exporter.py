@@ -18,6 +18,11 @@ class IOFExporter:
         # servir si el projecte ja té les capes IOF creades: cada
         # element és (widget, text_base_del_tooltip).
         self._layer_dependent_widgets = []
+        # Igual que _layer_dependent_widgets, però per al botó "Exportar
+        # qualificacions especials", que només s'ha de poder fer servir
+        # si ja s'ha generat el mapa amb "Qualificacions especials
+        # afectades" (condició diferent de iof_layers_created()).
+        self._qualif_dependent_widgets = []
         # Cau de la plantilla d'estil QLR (Referencial Topogràfic
         # Territorial), perquè no calgui reanalitzar el XML (~3,5 MB)
         # cada cop que es descarrega un "Referencial topogràfic territorial vectorial" nou.
@@ -66,7 +71,7 @@ class IOFExporter:
             text="Digitalitzar",
             actions=[
                 ("Digitalitzar límits", self.run_limits, os.path.join(self.plugin_dir, "icons", "icon_border.png")),
-                ("Digitalitzar unitats de vegetació", self.run_unitats, os.path.join(self.plugin_dir, "icons", "icon_unitats.png")),
+                ("Digitalitzar tipologies forestals", self.run_unitats, os.path.join(self.plugin_dir, "icons", "icon_unitats.png")),
                 ("Digitalitzar camins", self.run_camins, os.path.join(self.plugin_dir, "icons", "icon_roads.png")),
                 ("Digitalitzar infraestructures de prevenció d'incendis", self.run_infra, os.path.join(self.plugin_dir, "icons", "icon_infra.png")),
                 ("Digitalitzar canvis d'ús", self.run_canvis, os.path.join(self.plugin_dir, "icons", "icon_canvis.png")),
@@ -87,13 +92,13 @@ class IOFExporter:
             requires_layers=True,
         )
 
-        # Separador vertical entre Dades i estils i Mapes ICGC
+        # Separador vertical entre Dades i estils i Cartografia
         self.toolbar.addSeparator()
 
-        # ── Botó "Mapes ICGC" amb submenú ──
+        # ── Botó "Cartografia" amb submenú ──
         self._add_dropdown_action(
             icon_path=os.path.join(self.plugin_dir, "icons", "globo.png"),
-            text="Mapes ICGC",
+            text="Cartografia de referència",
             actions=[
                 ("Base topogràfic", self.run_base_situacio, os.path.join(self.plugin_dir, "icons", "search.png")),
                 ("Referencial topogràfic territorial vectorial", self.run_base_topografica, os.path.join(self.plugin_dir, "icons", "topografic.png")),
@@ -101,7 +106,24 @@ class IOFExporter:
             ]
         )
 
-        # Separador vertical entre Mapes ICGC i Exportar IOF a TXT
+        # ── Botó "Qualificacions especials" amb submenú ──
+        self._add_dropdown_action(
+            icon_path=os.path.join(self.plugin_dir, "icons", "ecosistema.png"),
+            text="Qualificacions especials",
+            actions=[
+                ("Qualificacions especials afectades", self.run_carregar_qualificacions, os.path.join(self.plugin_dir, "icons", "zoo.png")),
+                ("Exportar qualificacions especials", self.run_exportar_qualificacions, os.path.join(self.plugin_dir, "icons", "informe-medico.png")),
+            ]
+        )
+        # "Exportar qualificacions especials" només s'activa quan ja
+        # existeix el grup de capes "Qualificacions especials" (generat
+        # per "Qualificacions especials afectades") amb almenys una capa.
+        for action in self.actions:
+            if action.text() == "Exportar qualificacions especials":
+                self._qualif_dependent_widgets.append((action, action.text()))
+                break
+
+        # Separador vertical entre Cartografia i Exportar IOF a TXT
         self.toolbar.addSeparator()
 
         self.add_action(
@@ -128,10 +150,16 @@ class IOFExporter:
         # i mantén-ho actualitzat en afegir/eliminar capes o en
         # obrir/crear un altre projecte.
         self._actualitza_estat_digitalitzacio()
+        # Activa/desactiva "Exportar qualificacions especials" segons si
+        # ja s'ha generat el mapa amb "Qualificacions especials afectades".
+        self._actualitza_estat_qualificacions()
         proj = QgsProject.instance()
         proj.layersAdded.connect(self._actualitza_estat_digitalitzacio)
         proj.layersRemoved.connect(self._actualitza_estat_digitalitzacio)
         proj.cleared.connect(self._actualitza_estat_digitalitzacio)
+        proj.layersAdded.connect(self._actualitza_estat_qualificacions)
+        proj.layersRemoved.connect(self._actualitza_estat_qualificacions)
+        proj.cleared.connect(self._actualitza_estat_qualificacions)
 
     def _actualitza_estat_digitalitzacio(self, *args):
         """Activa o desactiva els botons que necessiten les capes IOF
@@ -141,6 +169,18 @@ class IOFExporter:
         avis = "" if hi_ha_capes else "\n\n(Cal crear primer les capes amb «Crear capes IOF».)"
         for widget, text_base in self._layer_dependent_widgets:
             widget.setEnabled(hi_ha_capes)
+            widget.setToolTip(text_base + avis)
+
+    def _actualitza_estat_qualificacions(self, *args):
+        """Activa "Exportar qualificacions especials" només si el grup
+        de capes "Qualificacions especials" ja existeix amb almenys una
+        capa (generat prèviament amb "Qualificacions especials
+        afectades")."""
+        grup = QgsProject.instance().layerTreeRoot().findGroup("Qualificacions especials")
+        hi_ha_mapa = grup is not None and len(grup.findLayers()) > 0
+        avis = "" if hi_ha_mapa else "\n\n(Cal carregar primer el mapa amb «Qualificacions especials afectades».)"
+        for widget, text_base in self._qualif_dependent_widgets:
+            widget.setEnabled(hi_ha_mapa)
             widget.setToolTip(text_base + avis)
 
     def unload(self):
@@ -155,6 +195,18 @@ class IOFExporter:
             pass
         try:
             proj.cleared.disconnect(self._actualitza_estat_digitalitzacio)
+        except Exception:  # nosec — error no crític, es descarta intencionadament
+            pass
+        try:
+            proj.layersAdded.disconnect(self._actualitza_estat_qualificacions)
+        except Exception:  # nosec — error no crític, es descarta intencionadament
+            pass
+        try:
+            proj.layersRemoved.disconnect(self._actualitza_estat_qualificacions)
+        except Exception:  # nosec — error no crític, es descarta intencionadament
+            pass
+        try:
+            proj.cleared.disconnect(self._actualitza_estat_qualificacions)
         except Exception:  # nosec — error no crític, es descarta intencionadament
             pass
         for action in self.actions:
@@ -319,6 +371,14 @@ class IOFExporter:
     def run_aplicar_estil(self):
         from .iof_estil_cadastre import aplicar_estil_cadastre
         aplicar_estil_cadastre(self.iface)
+
+    def run_carregar_qualificacions(self):
+        from .iof_qualificacions_especials import run_carregar_qualificacions
+        run_carregar_qualificacions(self.iface)
+
+    def run_exportar_qualificacions(self):
+        from .iof_qualificacions_especials import run_exportar_qualificacions
+        run_exportar_qualificacions(self.iface)
 
     def run_crear_ambit(self):
         from .iof_ambit_dialog import crear_ambit_iof

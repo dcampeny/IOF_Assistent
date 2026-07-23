@@ -636,7 +636,7 @@ class IOFExporterDialog(QDialog):
                 if incompletes_finques:
                     problemes.append(
                         f"{len(incompletes_finques)} finca(es) sense "
-                        f"unitats de vegetació completes"
+                        f"tipologies forestals completes"
                     )
 
         if problemes:

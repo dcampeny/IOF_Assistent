@@ -109,7 +109,7 @@ def activar_snapping_totes_capes(iface, tolerance=12):
     Es restauren amb `restaurar_snapping()`.
 
     Cal cridar-la en obrir qualsevol eina de digitalització (camins,
-    canvis d'ús, infraestructures, unitats de vegetació/rodals).
+    canvis d'ús, infraestructures, tipologies forestals/rodals).
     Utilitzar `restaurar_snapping()` per desactivar-lo en tancar.
     """
     try:
@@ -358,9 +358,9 @@ find_exclusions = find_interior_polygons
 def units_for_finca(layer_unitats, finca_feat):
     """
     Retorna la llista de features de `layer_unitats` que pertanyen a la
-    finca donada. Criteri: el centroide de la unitat cau dins de la
-    geometria de la finca. Mateix criteri que fa servir
-    iof_unitats_wizard.py per digitalitzar-les.
+    finca donada. Criteri: un punt garantit dins la unitat (pointOnSurface,
+    no centroid -- el centroide d'un polígon molt allargat o còncau pot
+    caure fora del propi polígon) cau dins de la geometria de la finca.
     """
     if not layer_unitats:
         return []
@@ -372,15 +372,15 @@ def units_for_finca(layer_unitats, finca_feat):
         g = u.geometry()
         if not g or g.isEmpty():
             continue
-        centroide = g.centroid()
-        if finca_geom.contains(centroide):
+        punt = g.pointOnSurface()
+        if finca_geom.contains(punt):
             result.append(u)
     return result
 
 
 def finca_te_unitats_completes(layer_unitats, finca_feat):
     """
-    Retorna True si la finca donada ja té unitats de vegetació que
+    Retorna True si la finca donada ja té tipologies forestals que
     cobreixen tota la seva geometria (àrea de la unió >= 99% de l'àrea
     de la finca). Mateix llindar que fa servir
     iof_unitats_wizard.py::_finca_is_complete().

@@ -7,8 +7,8 @@ Propietat Forestal de Catalunya, i l'exportació de les seves dades SIG.
 Permet crear les 8 capes vectorials d'un IOF amb tots els camps necessaris,
 incorporar cartografia de suport (cadastral i de referència de l'ICGC:
 mapa base topogràfic, mapa referencial topogràfic territorial i
-ortofotomapa), digitalitzar-ne els elements (finques, unitats de
-vegetació, camins, infraestructures de prevenció d'incendis, canvis d'ús,
+ortofotomapa), digitalitzar-ne els elements (finques, tipologies
+forestals, camins, infraestructures de prevenció d'incendis, canvis d'ús,
 punts d'aigua, elements singulars i inventaris forestals), i exportar el
 fitxer `.txt` per a la importació a PDF segons les normes de redacció del
 CPF.
@@ -66,20 +66,49 @@ Ordre de treball recomanat:
    (servei ATOM de la Direcció General del Cadastre, sense autenticació).
 3. **Delimitar finques i àmbit** — *Cadastre → Seleccionar parcel·les
    cadastrals* i *Crear àmbit de l'IOF*.
-4. **Carregar cartografia de suport** (opcional) — *Mapes ICGC → Base
+4. **Carregar cartografia de suport** (opcional) — *Cartografia de referència → Base
    topogràfic / Referencial topogràfic territorial vectorial /
    Ortofotomapa*, com a referència visual per digitalitzar.
-5. **Digitalitzar cada capa** — *Digitalitzar → ...* per a unitats de
-   vegetació, camins, infraestructures de prevenció d'incendis, canvis
+5. **Qualificacions especials** (opcional, requereix haver carregat
+   abans el *Referencial topogràfic territorial vectorial* i tenir
+   creat l'Àmbit IOF) — botó propi al costat de "Cartografia de
+   referència": *Qualificacions especials afectades* descarrega les
+   capes oficials disponibles i les carrega en dos grups:
+   "Qualificacions especials" (ENPE, PEIN/PEIN-PE, Xarxa Natura 2000 i
+   fauna protegida — amb etiqueta d'espècie i grau de protecció —
+   quan tenen una part pròpia no coberta per una qualificació de rang
+   superior) i "Altres qualificacions especials" (PPP — amb etiqueta
+   —, utilitat pública i ZAU sempre, més la forma sencera de
+   qualsevol qualificació totalment coberta per una altra; ocult per
+   defecte, activable manualment). Fauna, utilitat pública i ZAU es
+   limiten al polígon real de l'Àmbit IOF, no només al seu rectangle
+   envolupant. Ho ajunta tot en un únic GeoPackage
+   "IOF_Qualificacions.gpkg" a l'arrel de la carpeta del projecte (el
+   mapa urbanístic no es visualitza); si algun servei no respon,
+   s'indica explícitament a l'avís final. *Exportar qualificacions
+   especials* (desactivat fins que s'hagi carregat aquest mapa)
+   calcula la superfície de cada tipologia forestal i de tot l'IOF
+   afectada per qualificacions especials (ENPE, PEIN, PEIN-PE, Reserva
+   Forestal, LIC, ZEPA, LIC-ZEPA, utilitat pública, fauna protegida,
+   ZAU, mapa urbanístic), indicant per a cada espai si té
+   correspondència amb el desplegable del formulari oficial del CPF, i
+   genera un informe (Excel o text, amb el nom de fitxer
+   "IOF_<nom de la finca>-Qualificacions_especials") amb els totals de
+   finca i la superfície afectada per unitat (sempre igual o inferior
+   a la superfície total ordenada), més una secció d'incendis
+   forestals (tipus de risc, perímetres de protecció prioritària) —
+   mostrant abans un resum de què s'ha pogut calcular i què no.
+6. **Digitalitzar cada capa** — *Digitalitzar → ...* per a tipologies
+   forestals, camins, infraestructures de prevenció d'incendis, canvis
    d'ús, punts d'aigua, elements singulars i inventaris forestals. Al
    diàleg d'inventaris hi ha també un botó per **importar punts
    massivament des d'un fitxer CSV** (columnes `codi_pi`, `coord_x`,
    `coord_y`). Si la capa ja té punts, es pot triar sobreescriure'ls o
    afegir-hi els nous.
-6. **Omplir camps i aplicar estil** — *Dades i estils → Omplir camps*
+7. **Omplir camps i aplicar estil** — *Dades i estils → Omplir camps*
    per assignar codis i formacions a cada element, i *Aplicar estil de
    gestió* per a la simbologia final del plànol.
-7. **Exportar el fitxer TXT** — *Exportar IOF a TXT*: selecciona la capa
+8. **Exportar el fitxer TXT** — *Exportar IOF a TXT*: selecciona la capa
    vectorial i els camps corresponents per a cada tipus de registre, prem
    **Vista prèvia** per comprovar-los, i **Exportar fitxer TXT** per
    generar el fitxer final per a la importació a PDF. Abans de copiar o
@@ -142,6 +171,17 @@ juliol de 2026. Es documenten aquí per si tornen a aparèixer amb dades noves:
 
 Si reapareix algun d'aquests errors amb dades noves, consulta la secció
 "Bugs coneguts / ja resolts" del `CLAUDE.md` per al detall tècnic.
+
+## Fonts de cartografia
+
+| Dada | Font | Servei |
+|---|---|---|
+| ENPE, PEIN, Xarxa Natura 2000, utilitat pública, fauna protegida | Generalitat de Catalunya | WFS sig.gencat.cat |
+| Perímetres de protecció prioritària, zones d'actuació urgent | Departament d'Agricultura, Ramaderia, Pesca i Alimentació | Descàrrega directa (agricultura.gencat.cat) |
+| Mapa urbanístic de Catalunya | Generalitat de Catalunya | WMS (dtes.gencat.cat) |
+| Tipus de risc d'incendis | Centre de la Propietat Forestal | Descàrrega directa (cpf.gencat.cat) |
+| Ortofotomapa, mapa base topogràfic, referencial topogràfic territorial | Institut Cartogràfic i Geològic de Catalunya (ICGC) | WMS / complement Open ICGC |
+| Cadastre | Direcció General del Cadastre | ATOM INSPIRE |
 
 ## Referència
 

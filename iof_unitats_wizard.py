@@ -1,18 +1,25 @@
 # -*- coding: utf-8 -*-
 """
-IOF Assistent — Assistent per digitalitzar unitats de vegetació.
+IOF Assistent — Assistent per digitalitzar tipologies forestals.
 
-Flux per a cada polígon de IOF_Finques (excloent els polígons interiors):
-  1. Ressaltar el polígon al mapa.
-  2. Preguntar si forma una única unitat de vegetació.
-     - Sí → copiar el polígon a IOF_Unitats_Actuacio/IOF_Rodals i continuar.
-     - No → activar l'eina de partició (o polígon tancat) per dividir-lo.
-  3. Passar al polígon següent fins que no n'hi hagi cap més.
+Flux (excloent els polígons interiors; una finca amb diverses parts
+separades i no adjacents es tracta igual, cada part com a entitat
+independent):
+  1. Si encara no hi ha cap unitat digitalitzada, es copia CADA finca
+     sencera (totes les seves parts) a IOF_Unitats_Actuacio/IOF_Rodals
+     com a unitat de partida (si ja n'hi havia d'una sessió anterior,
+     només es copien les finques que encara no en tinguin cap).
+  2. S'activa directament el mode de digitalització sobre TOTA la capa
+     alhora, sense cap ordre ni restricció de finca: l'usuari pot
+     dividir (línia de tall o polígon tancat), fusionar o eliminar
+     QUALSEVOL polígon del mapa, indistintament de a quina finca
+     pertanyi, en l'ordre que vulgui.
+  3. En prémer "He acabat la delimitació de tipologies forestals", es
+     desa tot i es mostra un resum del nombre d'unitats per cada finca.
 """
 
 from .iof_utils import (
     get_layer as _get_layer_util,
-    geom_sense_forats as _geom_sense_forats,
     find_interior_polygons as _find_exclusions,
     activar_snapping_totes_capes as _activar_snapping_totes_capes,
     restaurar_snapping as _restaurar_snapping,
@@ -316,6 +323,156 @@ class IOFSplitTool(QgsMapTool):
         super().deactivate()
 
 
+class IOFMergeDeleteTool(QgsMapTool):
+    """
+    Eina per eliminar un polígon d'unitat FUSIONANT-LO amb un veí, en
+    lloc de deixar un forat sense fondre (que és el que passava en
+    eliminar amb les eines natives de QGIS).
+
+    Flux:
+      1. Clic sobre el polígon que es vol eliminar.
+      2. Si toca exactament un altre polígon de la mateixa capa, es
+         fusionen automàticament (el veí "s'empassa" la geometria).
+      3. Si en toca més d'un, cal un segon clic sobre quin veí ha de
+         rebre'l (es demana explícitament, per no triar-ho a l'atzar).
+      4. Si no en toca cap (polígon aïllat), s'avisa que no es pot
+         fusionar i es demana confirmació per eliminar-lo igualment
+         (deixant, en aquest cas sí, un forat real).
+    """
+
+    def __init__(self, canvas, layer, on_status=None):
+        super().__init__(canvas)
+        self._canvas = canvas
+        self._layer = layer
+        self._on_status = on_status
+        self._pendent_fid = None  # fid seleccionat per eliminar, esperant triar veí
+
+    def _feature_at_point(self, map_pt):
+        from qgis.core import QgsGeometry
+        geom_pt = QgsGeometry.fromPointXY(map_pt)
+        for feat in self._layer.getFeatures():
+            g = feat.geometry()
+            if g and not g.isEmpty() and g.contains(geom_pt):
+                return feat.id()
+        return None
+
+    def _veins_de(self, fid):
+        feat = self._layer.getFeature(fid)
+        if not feat or not feat.isValid():
+            return []
+        g = feat.geometry()
+        if not g or g.isEmpty():
+            return []
+        veins = []
+        for other in self._layer.getFeatures():
+            if other.id() == fid:
+                continue
+            og = other.geometry()
+            if og and not og.isEmpty() and og.touches(g):
+                veins.append(other.id())
+        if not veins:
+            # Fallback: si "touches" no en troba cap (per petites
+            # separacions de digitalització -- vèrtexs que no coincideixen
+            # exactament), prova amb un buffer petit (5 cm).
+            buffer_g = g.buffer(0.05, 5)
+            for other in self._layer.getFeatures():
+                if other.id() == fid:
+                    continue
+                og = other.geometry()
+                if og and not og.isEmpty() and og.intersects(buffer_g):
+                    veins.append(other.id())
+        return veins
+
+    def _fusiona(self, fid_eliminar, fid_vei):
+        feat_elim = self._layer.getFeature(fid_eliminar)
+        feat_vei = self._layer.getFeature(fid_vei)
+        g_elim = feat_elim.geometry()
+        g_vei = feat_vei.geometry()
+        nova = g_vei.combine(g_elim)
+
+        # Neteja de forats residuals: quan es fusiona un polígon que
+        # s'havia "tallat" prèviament d'un contenidor (p. ex. per
+        # omplir un forat creat amb polígon tancat) però no encaixava
+        # exactament amb la vora (per la imprecisió normal de dibuixar
+        # a mà, fins i tot amb snapping), la unió (combine()) pot
+        # deixar forats minúsculs residuals -- provat en directe: dos
+        # forats de 69 i 25 m² van quedar després de fusionar dos
+        # polígons que se solapaven gairebé perfectament (99,3%). Es
+        # netegen els forats per sota d'aquest llindar, molt per sota
+        # de qualsevol forat real intencionat (p. ex. un de 394 m² es
+        # manté intacte).
+        LLINDAR_FORAT_RESIDUAL = 100
+        neta = nova.removeInteriorRings(LLINDAR_FORAT_RESIDUAL)
+        if neta and not neta.isEmpty():
+            if not neta.isMultipart():
+                neta.convertToMultiType()
+            nova = neta
+
+        if not self._layer.isEditable():
+            self._layer.startEditing()
+        ok1 = self._layer.changeGeometry(fid_vei, nova)
+        ok2 = self._layer.deleteFeature(fid_eliminar)
+        self._layer.triggerRepaint()
+        self._canvas.refresh()
+        _log(f"IOFMergeDeleteTool: fusionat fid={fid_eliminar} amb veí fid={fid_vei} "
+             f"(canvi geometria OK={ok1}, eliminació OK={ok2})")
+        if self._on_status:
+            self._on_status("fusionat", fid_eliminar, fid_vei)
+
+    def _demana_eliminar_sense_fusio(self, fid):
+        reply = QMessageBox.question(
+            self._canvas.window(), "No es pot fusionar",
+            "Aquest polígon no toca cap altra tipologia forestal.\n\n"
+            "Vols eliminar-lo igualment? Quedarà un forat que caldrà "
+            "omplir manualment més endavant (amb el mode Polígon tancat).",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            if not self._layer.isEditable():
+                self._layer.startEditing()
+            self._layer.deleteFeature(fid)
+            self._layer.triggerRepaint()
+            self._canvas.refresh()
+            if self._on_status:
+                self._on_status("eliminat_sense_fusio", fid, None)
+        else:
+            if self._on_status:
+                self._on_status("cancellat", fid, None)
+
+    def canvasReleaseEvent(self, event):
+        from qgis.PyQt.QtCore import Qt as _Qt
+        if event.button() != _Qt.MouseButton.LeftButton:
+            return
+        map_pt = self.toMapCoordinates(event.pos())
+
+        if self._pendent_fid is None:
+            fid = self._feature_at_point(map_pt)
+            if fid is None:
+                return
+            veins = self._veins_de(fid)
+            if len(veins) == 0:
+                self._demana_eliminar_sense_fusio(fid)
+            elif len(veins) == 1:
+                self._fusiona(fid, veins[0])
+            else:
+                self._pendent_fid = fid
+                if self._on_status:
+                    self._on_status("esperant_vei", fid, veins)
+        else:
+            fid_vei = self._feature_at_point(map_pt)
+            veins_valids = self._veins_de(self._pendent_fid)
+            if fid_vei is None or fid_vei not in veins_valids:
+                if self._on_status:
+                    self._on_status("vei_no_valid", self._pendent_fid, None)
+                return
+            self._fusiona(self._pendent_fid, fid_vei)
+            self._pendent_fid = None
+
+    def deactivate(self):
+        self._pendent_fid = None
+        super().deactivate()
+
+
 class UnitatsWizard(QDialog):
 
     def __init__(self, iface):
@@ -324,19 +481,19 @@ class UnitatsWizard(QDialog):
         self._layer_finques = None
         self._layer_unitats = None
         self._finques = []
-        self._current = 0
+        self._grups = []  # cada element és una llista de parts (una finca sencera)
         self._rubber_band = None
         self._split_tool = None
+        self._merge_tool = None
         self._draw_mode = 'split'
         self._cancelled = False
 
         # Botons permanents
-        self._btn_unic = None
-        self._btn_multi = None
         self._btn_done = None
         self._btn_switch = None
+        self._btn_delete_merge = None
 
-        self.setWindowTitle("IOF Assistent — Digitalitzar unitats de vegetació")
+        self.setWindowTitle("IOF Assistent — Digitalitzar tipologies forestals")
         self.setWindowFlags(
             Qt.WindowType.Window | Qt.WindowType.WindowTitleHint | Qt.WindowType.WindowCloseButtonHint | Qt.WindowType.WindowMinimizeButtonHint | Qt.WindowType.WindowStaysOnTopHint
         )
@@ -374,22 +531,6 @@ class UnitatsWizard(QDialog):
         sep.setStyleSheet("color:#ccc;")
         layout.addWidget(sep)
 
-        self._btn_unic = QPushButton()
-        self._btn_unic.setStyleSheet(
-            "background:#1565c0; color:white; font-weight:bold; padding:8px;"
-        )
-        self._btn_unic.clicked.connect(self._on_btn_unic)
-        self._btn_unic.hide()
-        layout.addWidget(self._btn_unic)
-
-        self._btn_multi = QPushButton()
-        self._btn_multi.setStyleSheet(
-            "background:#2e7d32; color:white; font-weight:bold; padding:8px;"
-        )
-        self._btn_multi.clicked.connect(self._on_btn_multi)
-        self._btn_multi.hide()
-        layout.addWidget(self._btn_multi)
-
         self._btn_done = QPushButton()
         self._btn_done.setStyleSheet(
             "background:#2e7d32; color:white; font-weight:bold; padding:8px;"
@@ -405,6 +546,14 @@ class UnitatsWizard(QDialog):
         self._btn_switch.clicked.connect(self._on_btn_switch)
         self._btn_switch.hide()
         layout.addWidget(self._btn_switch)
+
+        self._btn_delete_merge = QPushButton("🗑️ Eliminar tipologia forestal")
+        self._btn_delete_merge.setStyleSheet(
+            "background:#8e24aa; color:white; font-weight:bold; padding:7px;"
+        )
+        self._btn_delete_merge.clicked.connect(self._on_btn_delete_merge)
+        self._btn_delete_merge.hide()
+        layout.addWidget(self._btn_delete_merge)
 
         sep2 = QFrame()
         sep2.setFrameShape(QFrame.Shape.HLine)
@@ -443,62 +592,70 @@ class UnitatsWizard(QDialog):
             return False
         return True
 
-    def _units_for_finca(self, finca_feat):
+    def _units_for_finca(self, parts_finca):
         """
-        Retorna la llista de features d'unitats que pertanyen a la finca donada.
-        Criteri: el centroide de la unitat cau dins de la geometria de la finca
-        (tolerància: bbox expandit 1 m per cobrir vèrtexs exactament al límit).
+        Retorna la llista de features d'unitats que pertanyen a la finca
+        donada. `parts_finca` és una llista de parts (una finca pot tenir
+        diverses parts separades -- vegeu _load_finques). Criteri: un
+        punt garantit dins la unitat cau dins la geometria d'ALGUNA de
+        les parts.
         """
         if not self._layer_unitats:
             return []
-        finca_geom = finca_feat.geometry()
-        if not finca_geom or finca_geom.isEmpty():
+        geoms_finca = [
+            p.geometry() for p in parts_finca
+            if p.geometry() and not p.geometry().isEmpty()
+        ]
+        if not geoms_finca:
             return []
         result = []
         for u in self._layer_unitats.getFeatures():
             g = u.geometry()
             if not g or g.isEmpty():
                 continue
-            centroide = g.centroid()
-            if finca_geom.contains(centroide):
+            # pointOnSurface() en lloc de centroid(): el centroide
+            # geomètric d'un polígon molt allargat, tort o còncau pot
+            # caure FORA del propi polígon (provat en directe: un
+            # polígon en forma de "S" tenia el centroide fora de si
+            # mateix), fent que no s'atribuís a cap finca i quedés fora
+            # del recompte final. pointOnSurface() garanteix sempre un
+            # punt dins de la geometria.
+            punt = g.pointOnSurface()
+            if any(fg.contains(punt) for fg in geoms_finca):
                 result.append(u)
         return result
 
-    def _finca_is_complete(self, finca_feat):
-        """
-        Retorna True si la finca ja té unitats que cobreixen tota la
-        seva geometria (àrea de la unió ≥ 99% de l'àrea de la finca).
-        """
-        units = self._units_for_finca(finca_feat)
-        if not units:
-            return False
-        finca_area = finca_feat.geometry().area()
-        if finca_area <= 0:
-            return True
-        union = units[0].geometry()
-        for u in units[1:]:
-            union = union.combine(u.geometry())
-        covered = union.intersection(finca_feat.geometry()).area()
-        return (covered / finca_area) >= 0.99
-
-    def _find_resume_index(self):
-        """
-        Troba l'índex de la primera finca que no té unitats completes.
-        Si totes estan completes, retorna l'última (per mostrar la pantalla done).
-        """
-        for i, finca in enumerate(self._finques):
-            if not self._finca_is_complete(finca):
-                return i
-        return len(self._finques) - 1
-
     def _load_finques(self):
-        """Carrega els polígons de finca excloent els polígons interiors."""
+        """Carrega els polígons de finca excloent els polígons interiors.
+
+        Si una finca és un MultiPolygon amb diverses parts separades i
+        no adjacents (p. ex. dues parcel·les físicament disjuntes),
+        cada part es tracta com un polígon INDEPENDENT -- totes es
+        copien igualment com a unitats de partida i es poden delimitar
+        (dividir/fusionar/eliminar) amb total llibertat, sense cap
+        ordre ni restricció de finca."""
         all_feats = list(self._layer_finques.getFeatures())
         exclusion_ids = _find_exclusions(all_feats)
-        self._finques = [f for f in all_feats if f.id() not in exclusion_ids]
+        finques_valides = [f for f in all_feats if f.id() not in exclusion_ids]
+
+        self._finques = []
+        for f in finques_valides:
+            geom = f.geometry()
+            if not geom or geom.isEmpty():
+                continue
+            parts = geom.asGeometryCollection() if geom.isMultipart() else [geom]
+            parts = [p for p in parts if p and not p.isEmpty()]
+            if len(parts) > 1:
+                _log(f"_load_finques: finca fid={f.id()} té {len(parts)} parts "
+                     f"separades -- es tracten com a polígons independents")
+            for part_geom in parts:
+                nf = QgsFeature(f)
+                nf.setGeometry(part_geom)
+                self._finques.append(nf)
 
         n_excl = len(exclusion_ids)
-        _log(f"Finques: {len(self._finques)} vàlides, {n_excl} excloses (id={exclusion_ids})")
+        _log(f"Finques: {len(self._finques)} polígons vàlids "
+             f"({len(finques_valides)} entitats), {n_excl} excloses (id={exclusion_ids})")
 
         if not self._finques:
             self._lbl_title.setText("Error")
@@ -545,118 +702,52 @@ class UnitatsWizard(QDialog):
                 lyr.commitChanges()
             # Si clicked == btn_cont, continuem amb la detecció
 
-        # Sempre comencem des del primer polígon;
-        # _show_step_finca preguntarà per cada finca que ja tingui unitats
-        self._current = 0
-        self._show_step_finca()
+        # Agrupa les parts (self._finques, una entrada per part separada
+        # -- vegeu la nota més amunt sobre finques multi-part) per
+        # codi_finca: cada grup representa ara una FINCA SENCERA (totes
+        # les seves parts, encara que estiguin separades). L'assistent
+        # avança per grup, no per part individual, perquè l'usuari
+        # pugui delimitar unitats sobre QUALSEVOL part de la finca en
+        # un mateix pas, en lloc d'haver de completar-les una a una en
+        # un ordre fix. Com que totes les parts d'una mateixa finca
+        # multi-part comparteixen el mateix id() (per la còpia amb
+        # QgsFeature(f) a _load_finques), agrupar per id() com a
+        # alternativa quan no hi ha codi_finca també funciona
+        # correctament.
+        grups_per_clau = {}
+        ordre_claus = []
+        for f in self._finques:
+            codi = f["codi_finca"] if "codi_finca" in f.fields().names() else None
+            clau = str(codi) if codi not in (None, "", "NULL") else f"__id_{f.id()}"
+            if clau not in grups_per_clau:
+                grups_per_clau[clau] = []
+                ordre_claus.append(clau)
+            grups_per_clau[clau].append(f)
+        self._grups = [grups_per_clau[c] for c in ordre_claus]
+        _log(f"Finques agrupades: {len(self._grups)} finques "
+             f"({len(self._finques)} polígons en total)")
 
-    # ------------------------------------------------------------------
-    # Pas principal: un polígon de finca
-    # ------------------------------------------------------------------
+        # Ja no hi ha cap pas ni ordre per finca: es pot digitalitzar
+        # qualsevol polígon del mapa, indistintament de la finca a què
+        # pertanyi. Es copien com a unitats senceres les finques que
+        # encara no en tinguin cap (a la primera obertura, totes; en
+        # reprendre una sessió anterior, només les que faltin), i
+        # s'activa directament el mode de digitalització sobre tota la
+        # capa.
+        for grup in self._grups:
+            if not self._units_for_finca(grup):
+                self._copiar_finca_com_a_unitats(grup)
 
-    def _show_step_finca(self):
-        """Mostra el diàleg per al polígon de finca actual."""
-        feat = self._finques[self._current]
-        total = len(self._finques)
-        idx = self._current + 1
-        is_last = (idx == total)
+        self._activar_digitalitzacio()
 
-        # Ressaltar el polígon al mapa (sense zoom)
-        self._highlight(feat.geometry())
-
-        codi = feat["codi_finca"] or f"#{feat.id()}"
-
-        units = self._units_for_finca(feat)
-
-        if units:
-            # --- Polígon ja dividit: diàleg de represa ---
-            msg = QMessageBox(self)
-            msg.setWindowTitle(f"Finca {codi} — ja digitalitzada")
-            msg.setIcon(QMessageBox.Icon.Question)
-            msg.setText(
-                f"La finca {codi} ja té {len(units)} unitat"
-                f"{'s' if len(units) != 1 else ''} definida"
-                f"{'des' if len(units) != 1 else ''}.\n\n"
-                "Què vols fer?"
-            )
-            msg.addButton("Reprendre la digitalització", QMessageBox.ButtonRole.AcceptRole)
-            btn_unica = msg.addButton("Convertir en una única unitat", QMessageBox.ButtonRole.AcceptRole)
-            btn_ok = msg.addButton(
-                "És correcte. Passar al següent." if not is_last else "És correcte.",
-                QMessageBox.ButtonRole.AcceptRole
-            )
-            btn_cancel = msg.addButton("Cancel·lar", QMessageBox.ButtonRole.RejectRole)
-            msg.setDefaultButton(btn_ok)
-            msg.exec()
-            clicked = msg.clickedButton()
-
-            if clicked == btn_cancel:
-                # Tanca l'assistent sencer (amb la mateixa neteja i
-                # confirmació de canvis pendents que "Tancar assistent"),
-                # no només aquest pas.
-                self._close_wizard()
-                return
-            if clicked == btn_unica:
-                self._delete_units_for_finca(feat)
-                self._copy_finca_as_unit()
-                self._finish_current_finca()
-                return
-            if clicked == btn_ok:
-                self._finish_current_finca()
-                return
-            # btn_rep: activar mode split sense copiar
-            self._setup_snapping()
-            self._suppress_attribute_form(True)
-            if not self._layer_unitats.isEditable():
-                self._layer_unitats.startEditing()
-            self.iface.setActiveLayer(self._layer_unitats)
-            self._layer_unitats.featureAdded.connect(self._on_feature_added)
-            self._draw_mode = 'split'
-            self._trigger_split_tool()
-            self._apply_digitizing_style()
-            self._clear_highlight()
-            self._show_step_split()
-            return
-
-        # --- Polígon sense unitats: diàleg inicial ---
-        self._lbl_title.setText(f"Polígon {idx} de {total} — Finca {codi}")
-        self._lbl_info.setText(
-            f"El polígon ressaltat al mapa correspon a la finca {codi}.\n\n"
-            "Aquest polígon forma una única unitat de vegetació, "
-            "o cal dividir-lo en diverses unitats?"
-        )
-        self._btn_unic.setText("És una única unitat de vegetació")
-        self._btn_multi.setText("Cal dividir en diverses unitats")
-        self._btn_unic.show()
-        self._btn_multi.show()
-        self._btn_done.hide()
-        self._btn_switch.hide()
-        self.adjustSize()
     # ------------------------------------------------------------------
     # Callbacks dels botons
     # ------------------------------------------------------------------
 
-    def _on_btn_unic(self):
-        _log("Botó 'única unitat' premut")
-        try:
-            self._copy_finca_as_unit()
-            self._next_finca()
-        except Exception as e:
-            _log(f"ERROR _on_btn_unic: {e}")
-            QMessageBox.critical(self, "Error", str(e))
-
-    def _on_btn_multi(self):
-        _log("Botó 'diverses unitats' premut")
-        try:
-            self._start_digitizing()
-        except Exception as e:
-            _log(f"ERROR _on_btn_multi: {e}")
-            QMessageBox.critical(self, "Error", str(e))
-
     def _on_btn_done(self):
-        _log("Botó 'he acabat' premut")
+        _log("Botó 'he acabat la delimitació' premut")
         try:
-            self._finish_current_finca()
+            self._finalitzar_digitalitzacio()
         except Exception as e:
             _log(f"ERROR _on_btn_done: {e}")
             QMessageBox.critical(self, "Error", str(e))
@@ -677,48 +768,107 @@ class UnitatsWizard(QDialog):
         except Exception as e:
             _log(f"ERROR _on_btn_switch: {e}")
 
-    # ------------------------------------------------------------------
-    # Opció A: copiar el polígon sencer com a unitat única
-    # ------------------------------------------------------------------
+    def _on_btn_delete_merge(self):
+        _log("Botó 'Eliminar polígon (unir a un veí)' premut")
+        try:
+            self._draw_mode_abans_merge = self._draw_mode
+            self._lbl_info.setText(
+                "<b>Mode: Eliminar i fusionar</b><br><br>"
+                "Fes clic sobre el polígon que vols eliminar.<br><br>"
+                "<i>Si toca un altre polígon, es fusionaran automàticament. "
+                "Si en toca més d'un, es demanarà quin ha de rebre'l. "
+                "Si no en toca cap, es preguntarà si vols eliminar-lo "
+                "igualment (deixant un forat).</i>"
+            )
+            self.iface.setActiveLayer(self._layer_unitats)
+            self._merge_tool = IOFMergeDeleteTool(
+                self.iface.mapCanvas(), self._layer_unitats,
+                on_status=self._on_merge_status,
+            )
+            self.iface.mapCanvas().setMapTool(self._merge_tool)
+            self.adjustSize()
+        except Exception as e:
+            _log(f"ERROR _on_btn_delete_merge: {e}")
+            QMessageBox.critical(self, "Error", str(e))
 
-    def _delete_units_for_finca(self, finca_feat):
-        """Elimina totes les unitats que corresponen a la finca donada."""
-        units = self._units_for_finca(finca_feat)
-        if not units:
+    def _on_merge_status(self, status, fid, extra):
+        """Callback d'IOFMergeDeleteTool: actualitza el text informatiu
+        segons l'estat, i torna al mode de dibuix anterior (split o
+        polígon tancat) un cop la fusió/eliminació s'ha resolt."""
+        if status == "esperant_vei":
+            self._lbl_info.setText(
+                f"<b>Mode: Eliminar i fusionar</b><br><br>"
+                f"Aquest polígon toca {len(extra)} veïns.<br>"
+                "Fes clic ara sobre <b>quin d'ells</b> ha de rebre'l."
+            )
+            self.adjustSize()
             return
-        lu = self._layer_unitats
-        lu.startEditing()
-        for u in units:
-            lu.deleteFeature(u.id())
-        lu.commitChanges()
+        if status == "vei_no_valid":
+            QMessageBox.information(
+                self, "Selecció no vàlida",
+                "El punt clicat no toca el polígon que vols eliminar. "
+                "Torna-ho a provar clicant sobre un dels seus veïns."
+            )
+            return
+        # "fusionat", "eliminat_sense_fusio" o "cancellat": es torna al
+        # mode de dibuix (split o polígon tancat) que hi havia abans
+        # de prémer "Eliminar polígon".
+        self._draw_mode = getattr(self, "_draw_mode_abans_merge", "split")
+        self.iface.setActiveLayer(self._layer_unitats)
+        if self._draw_mode == 'split':
+            self._trigger_split_tool()
+        else:
+            self.iface.actionAddFeature().trigger()
+        self._update_split_panel()
+        self.adjustSize()
 
-    def _copy_finca_as_unit(self):
-        feat = self._finques[self._current]
-        geom = QgsGeometry(feat.geometry())
+    # ------------------------------------------------------------------
+    # Còpia inicial: cada finca sencera com a unitat/unitats de partida
+    # ------------------------------------------------------------------
+
+    def _copiar_finca_com_a_unitats(self, parts_finca):
+        """Copia TOTES les parts de la finca donada a la capa d'unitats,
+        cadascuna com a entitat independent."""
         lu = self._layer_unitats
-        # Copiar la geometria tal com és (amb els forats si en té).
-        # QGIS calcula area() descomptant els forats automàticament.
-        #
-        # Les geometries de finca (sovint importades del cadastre) poden
-        # arribar amb autointerseccions o altres invalideses que fan
-        # fallar més endavant splitGeometry() i difference() sense avís
-        # clar. Es valida i, si cal, es corregeix aquí — a l'origen —
-        # perquè tota la resta del flux (tall, resta de polígons) treballi
-        # sempre amb geometria neta.
-        if not geom.isGeosValid():
-            fixed = geom.makeValid()
-            if fixed and not fixed.isEmpty():
-                _log(f"_copy_finca_as_unit: geometria de finca fid={feat.id()} "
-                     f"no vàlida — corregida amb makeValid()")
-                geom = fixed
-            else:
-                _log(f"_copy_finca_as_unit: ERROR — geometria de finca fid={feat.id()} "
-                     f"no vàlida i makeValid() no l'ha pogut arreglar")
         lu.startEditing()
-        nf = QgsFeature(lu.fields())
-        nf.setGeometry(geom)
-        lu.addFeature(nf)
+        total_parts_creades = 0
+        for feat in parts_finca:
+            geom = QgsGeometry(feat.geometry())
+            # Copiar la geometria tal com és (amb els forats si en té).
+            # QGIS calcula area() descomptant els forats automàticament.
+            #
+            # Les geometries de finca (sovint importades del cadastre) poden
+            # arribar amb autointerseccions o altres invalideses que fan
+            # fallar més endavant splitGeometry() i difference() sense avís
+            # clar. Es valida i, si cal, es corregeix aquí — a l'origen —
+            # perquè tota la resta del flux (tall, resta de polígons) treballi
+            # sempre amb geometria neta.
+            if not geom.isGeosValid():
+                fixed = geom.makeValid()
+                if fixed and not fixed.isEmpty():
+                    _log(f"_copiar_finca_com_a_unitats: geometria de finca fid={feat.id()} "
+                         f"no vàlida — corregida amb makeValid()")
+                    geom = fixed
+                else:
+                    _log(f"_copiar_finca_com_a_unitats: ERROR — geometria de finca fid={feat.id()} "
+                         f"no vàlida i makeValid() no l'ha pogut arreglar")
+
+            # Defensa addicional (no hauria de caldre, ja que
+            # _load_finques() ja separa cada finca multi-part en parts
+            # individuals): si aquesta part encara fos multi-part, es
+            # torna a separar.
+            subparts = geom.asGeometryCollection() if geom.isMultipart() else [geom]
+            for part_geom in subparts:
+                if not part_geom or part_geom.isEmpty():
+                    continue
+                nf = QgsFeature(lu.fields())
+                nf.setGeometry(part_geom)
+                lu.addFeature(nf)
+                total_parts_creades += 1
         lu.commitChanges()
+        if len(parts_finca) > 1:
+            _log(f"_copiar_finca_com_a_unitats: finca amb {len(parts_finca)} parts separades "
+                 f"-- creades {total_parts_creades} entitats a la capa d'unitats")
         # Eliminar polígons d'exclusió que puguin haver quedat a la capa
         self._remove_exclusions_from_unitats()
 
@@ -793,23 +943,28 @@ class UnitatsWizard(QDialog):
             _log(f"Eliminats {len(to_delete)} polígons d'exclusió de {lu.name()}")
 
     # ------------------------------------------------------------------
-    # Opció B: dividir en diverses unitats (eina de partició)
+    # Digitalització lliure: dividir/fusionar/eliminar sobre tota la capa
     # ------------------------------------------------------------------
 
-    def _start_digitizing(self):
-        """Copia el polígon de finca a la capa d'unitats i activa l'eina de partició."""
-        self._copy_finca_as_unit()
+    def _activar_digitalitzacio(self):
+        """Activa el mode de digitalització (línia de tall, polígon
+        tancat, eliminar unitat) sobre TOTA la capa d'unitats alhora,
+        sense cap restricció d'ordre ni de finca -- es pot delimitar
+        qualsevol polígon del mapa, independentment de a quina finca
+        pertanyi."""
         self._setup_snapping()
         self._suppress_attribute_form(True)
-        self._layer_unitats.startEditing()
+        if not self._layer_unitats.isEditable():
+            self._layer_unitats.startEditing()
         self.iface.setActiveLayer(self._layer_unitats)
         self._layer_unitats.featureAdded.connect(self._on_feature_added)
+        self._layer_unitats.featureDeleted.connect(self._on_feature_deleted)
         self._draw_mode = 'split'
         self._trigger_split_tool()
         # Aplicar estil i netejar ressaltat DESPRÉS d'activar l'eina
         self._apply_digitizing_style()
         self._clear_highlight()
-        self._show_step_split()
+        self._show_panell_digitalitzacio()
 
     def _on_feature_added(self, fid):
         """
@@ -830,11 +985,23 @@ class UnitatsWizard(QDialog):
         if not new_geom or new_geom.isEmpty():
             return
 
-        # Trobar el polígon gran que conté el nou (el que té més àrea i el seu bbox inclou el nou)
-        bb_new = new_geom.boundingBox()
+        # Trobar el polígon gran que conté el nou (el candidat amb més
+        # percentatge de solapament, entre els que tenen més àrea)
         area_new = new_geom.area()
         container_fid = None
         container_geom = None
+        millor_fraccio = 0.0
+
+        # LLINDAR_SOLAPAMENT: no es requereix contenció EXACTA (100%)
+        # perquè un polígon dibuixat a mà -- fins i tot amb snapping --
+        # gairebé mai coincideix vèrtex a vèrtex amb el contorn del
+        # contenidor; sempre queda alguna micro-diferència que fa que
+        # contains() doni fals (provat en directe: un polígon que se
+        # solapava un 99,3% amb el seu contenidor no es considerava
+        # "contingut" amb un test estricte, i el forat no es restava
+        # mai). Es considera contenidor el candidat amb més àrea que
+        # cobreixi almenys aquest percentatge del polígon nou.
+        LLINDAR_SOLAPAMENT = 0.90
 
         for feat in lu.getFeatures():
             if feat.id() == fid:
@@ -844,21 +1011,21 @@ class UnitatsWizard(QDialog):
                 continue
             if g.area() <= area_new:
                 continue
-            bb = g.boundingBox()
-            # El nou polígon cau dins del gran?
-            conte_nou = all([
-                bb_new.xMinimum() >= bb.xMinimum(),
-                bb_new.yMinimum() >= bb.yMinimum(),
-                bb_new.xMaximum() <= bb.xMaximum(),
-                bb_new.yMaximum() <= bb.yMaximum(),
-            ])
-            if conte_nou:
+            if not g.intersects(new_geom):
+                continue
+            interseccio = g.intersection(new_geom).area()
+            fraccio = interseccio / area_new if area_new > 0 else 0
+            if fraccio > millor_fraccio:
+                millor_fraccio = fraccio
                 container_fid = feat.id()
                 container_geom = g
-                break
 
-        if container_fid is None:
-            return  # No hi ha cap contenidor — polígon independent, no fer res
+        if container_fid is None or millor_fraccio < LLINDAR_SOLAPAMENT:
+            if container_fid is not None:
+                _log(f"_on_feature_added: millor candidat fid={container_fid} només se solapa "
+                     f"un {millor_fraccio * 100:.1f}% amb el nou polígon -- per sota del "
+                     f"llindar ({LLINDAR_SOLAPAMENT * 100:.0f}%), no es considera contenidor")
+            return  # No hi ha cap contenidor prou clar — polígon independent, no fer res
 
         # Geometria invàlida al contenidor (mateixa causa que a
         # IOFSplitTool) fa que difference() torni buida sense cap error
@@ -879,10 +1046,25 @@ class UnitatsWizard(QDialog):
             _log(f"ERROR: difference retorna buit — fid_container={container_fid} "
                  f"(geometria contenidora encara invàlida després de makeValid()?)")
 
+    def _on_feature_deleted(self, fid):
+        """Quan s'elimina una entitat de la capa d'unitats durant la
+        digitalització, força un repintat del mapa. Sense això, la
+        geometria eliminada podia quedar dibuixada ("fantasma") -- ja
+        no seleccionable, però visualment present i confonent -- fins
+        que es dibuixava una altra entitat nova (moment en què el
+        renderer personalitzat que apliquem durant la digitalització
+        finalment es refrescava)."""
+        self._layer_unitats.triggerRepaint()
+        self.iface.mapCanvas().refresh()
+
     def _disconnect_feature_added(self):
-        """Desconnecta el signal featureAdded si estava connectat."""
+        """Desconnecta els signals featureAdded/featureDeleted si estaven connectats."""
         try:
             self._layer_unitats.featureAdded.disconnect(self._on_feature_added)
+        except Exception:  # nosec — error no crític, es descarta intencionadament
+            pass
+        try:
+            self._layer_unitats.featureDeleted.disconnect(self._on_feature_deleted)
         except Exception:  # nosec — error no crític, es descarta intencionadament
             pass
 
@@ -923,23 +1105,18 @@ class UnitatsWizard(QDialog):
             self._renderer_backup = None
             self._layer_unitats.triggerRepaint()
 
-    def _show_step_split(self):
-        feat = self._finques[self._current]
-        codi = feat["codi_finca"] or f"#{feat.id()}"
-        total = len(self._finques)
-        idx = self._current + 1
-
+    def _show_panell_digitalitzacio(self):
+        total = len(self._grups)
         self._lbl_title.setText(
-            f"Dividint polígon {idx}/{total} — Finca {codi}"
+            f"Delimitant tipologies forestals ({total} finca{'s' if total != 1 else ''})"
         )
         self._draw_mode = 'split'
         self._update_split_panel()
 
-        self._btn_unic.hide()
-        self._btn_multi.hide()
-        self._btn_done.setText("He acabat de dividir aquest polígon ✔")
+        self._btn_done.setText("He acabat la delimitació de tipologies forestals ✔")
         self._btn_done.show()
         self._btn_switch.show()
+        self._btn_delete_merge.show()
         self.adjustSize()
 
     def _update_split_panel(self):
@@ -979,8 +1156,9 @@ class UnitatsWizard(QDialog):
             config.setSuppress(QgsEditFormConfig.FeatureFormSuppress.SuppressOff)
         self._layer_unitats.setEditFormConfig(config)
 
-    def _finish_current_finca(self):
-        """Desa els canvis del polígon actual i passa al següent."""
+    def _finalitzar_digitalitzacio(self):
+        """Desa els canvis i mostra el resum final (per a totes les
+        finques, s'hagin visitat o no explícitament)."""
         self._disconnect_feature_added()
         self._restore_digitizing_style()
         self._restore_snapping()
@@ -989,27 +1167,25 @@ class UnitatsWizard(QDialog):
         if self._layer_unitats.isEditable():
             self._layer_unitats.commitChanges()
         self.iface.mapCanvas().refresh()
-        self._next_finca()
-
-    def _next_finca(self):
-        """Passa al polígon de finca següent o finalitza."""
-        self._current += 1
-        if self._current < len(self._finques):
-            self._show_step_finca()
-        else:
-            self._show_done()
+        self._show_done()
 
     def _show_done(self):
         self._clear_highlight()
         n = self._layer_unitats.featureCount()
-        self._btn_unic.hide()
-        self._btn_multi.hide()
         self._btn_done.hide()
         self._btn_switch.hide()
+        self._btn_delete_merge.hide()
         self._lbl_title.setText("Digitalització completada ✔")
+        detall = "\n".join(
+            f"  • Finca {(grup[0]['codi_finca'] or f'#{grup[0].id()}')}: "
+            f"{len(self._units_for_finca(grup))} "
+            f"{'tipologies forestals' if len(self._units_for_finca(grup)) != 1 else 'tipologia forestal'}"
+            for grup in self._grups
+        )
         self._lbl_info.setText(
             f"La capa «{self._layer_unitats.name()}» conté ara "
-            f"{n} unitat{'s' if n != 1 else ''} de vegetació.\n\n"
+            f"{n} {'tipologies forestals' if n != 1 else 'tipologia forestal'}:\n\n"
+            f"{detall}\n\n"
             "Recorda completar els camps de cada unitat "
             "des de la taula d'atributs."
         )
@@ -1018,18 +1194,6 @@ class UnitatsWizard(QDialog):
     # ------------------------------------------------------------------
     # Rubber band (ressaltat del polígon actiu)
     # ------------------------------------------------------------------
-
-    def _highlight(self, geom):
-        canvas = self.iface.mapCanvas()
-        if self._rubber_band is None:
-            self._rubber_band = QgsRubberBand(canvas, QgsWkbTypes.GeometryType.PolygonGeometry)
-        self._rubber_band.setColor(QColor(255, 220, 0, 220))
-        self._rubber_band.setFillColor(QColor(255, 235, 0, 60))
-        self._rubber_band.setWidth(4)
-        self._rubber_band.setToGeometry(
-            _geom_sense_forats(geom), self._layer_finques
-        )
-        self._rubber_band.show()
 
     def _clear_highlight(self):
         if self._rubber_band is not None:
@@ -1099,15 +1263,19 @@ class UnitatsWizard(QDialog):
         if not self._confirm_close_with_edits():
             event.ignore()
             return
-        # Avisar si tanquem sense haver acabat totes les finques
-        total = len(self._finques)
-        if total > 1 and 0 < self._current < total:
-            pendents = total - self._current
+        # Avisar si tanquem sense que totes les finques tinguin cap
+        # tipologia forestal definida (comprovació directa, ja que no
+        # hi ha cap ordre ni posició "actual" que indiqui el progrés).
+        finques_sense_unitats = [
+            grup for grup in self._grups if not self._units_for_finca(grup)
+        ]
+        if finques_sense_unitats:
+            pendents = len(finques_sense_unitats)
             reply = QMessageBox.question(
                 self,
                 "Digitalització incompleta",
-                f"Encara queden {pendents} finca{'s' if pendents != 1 else ''} "
-                f"per digitalitzar ({self._current} de {total} completades).\n\n"
+                f"Encara hi ha {pendents} finca{'s' if pendents != 1 else ''} "
+                f"sense cap tipologia forestal definida.\n\n"
                 "Estàs segur que vols tancar l'assistent?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No

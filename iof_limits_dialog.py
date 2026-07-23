@@ -773,7 +773,7 @@ class LimitsDialog(QDialog):
         # netegen explícitament a cada polígon nou.
         try:
             lf.featureAdded.disconnect(self._on_finca_added)
-        except Exception:
+        except Exception:  # nosec — error no crític, es descarta intencionadament
             pass
         lf.featureAdded.connect(self._on_finca_added, Qt.ConnectionType.UniqueConnection)
 
@@ -805,7 +805,7 @@ class LimitsDialog(QDialog):
         try:
             if lf:
                 lf.featureAdded.disconnect(self._on_finca_added)
-        except Exception:
+        except Exception:  # nosec — error no crític, es descarta intencionadament
             pass
         if lf and lf.isEditable():
             if not lf.commitChanges():
@@ -831,7 +831,7 @@ class LimitsDialog(QDialog):
         try:
             if lf:
                 lf.featureAdded.disconnect(self._on_finca_added)
-        except Exception:
+        except Exception:  # nosec — error no crític, es descarta intencionadament
             pass
         if lf and lf.isEditable():
             reply = QMessageBox.question(

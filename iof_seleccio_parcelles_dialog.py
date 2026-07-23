@@ -65,10 +65,13 @@ def _expr(field, val):
 def _poligon_de_parcella(feat_parcel, layer_zoning):
     if not layer_zoning:
         return ""
-    centroid = feat_parcel.geometry().centroid()
-    req = QgsFeatureRequest().setFilterRect(centroid.boundingBox())
+    # pointOnSurface(), no centroid(): el centroide d'una parcel·la
+    # amb forma allargada o còncava pot caure fora de la pròpia
+    # parcel·la, fent que no es trobi cap zona coincident.
+    punt = feat_parcel.geometry().pointOnSurface()
+    req = QgsFeatureRequest().setFilterRect(punt.boundingBox())
     for z in layer_zoning.getFeatures(req):
-        if z.geometry().contains(centroid):
+        if z.geometry().contains(punt):
             return _get_field_value(z, "label", "zoningid")
     return ""
 
@@ -676,7 +679,7 @@ class SeleccioParcellsDial(QDialog):
             req = QgsFeatureRequest().setFilterExpression(_expr("label", variant))
             req.setFilterRect(pol_geom.boundingBox())
             for feat in self._layer_parcel.getFeatures(req):
-                if pol_geom.contains(feat.geometry().centroid()):
+                if pol_geom.contains(feat.geometry().pointOnSurface()):
                     candidats.append(feat)
             if candidats:
                 break
@@ -975,10 +978,10 @@ class SeleccioParcellsDial(QDialog):
                 mun_val = nom_municipi
             pol_val = ""
             if lz_feat:
-                centroid = feat.geometry().centroid()
-                req = QgsFeatureRequest().setFilterRect(centroid.boundingBox())
+                punt = feat.geometry().pointOnSurface()
+                req = QgsFeatureRequest().setFilterRect(punt.boundingBox())
                 for z in lz_feat.getFeatures(req):
-                    if z.geometry().contains(centroid):
+                    if z.geometry().contains(punt):
                         pol_val = _get_field_value(z, "label", "zoningid")
                         break
             area_ha = round(feat.geometry().area() / 10000.0, 2) if feat.geometry() else 0.0
@@ -1061,13 +1064,14 @@ class SeleccioParcellsDial(QDialog):
             parc_val = _get_field_value(feat, "label")
 
             # Polígon: intersecció espacial amb CadastralZoning
-            # Busca la zona correcta per municipi (per centroide)
+            # Busca la zona correcta per municipi (per un punt garantit
+            # dins la parcel·la, no el centroide)
             pol_val = ""
-            centroid = feat.geometry().centroid()
+            punt = feat.geometry().pointOnSurface()
             for lz in self._layers_zoning:
-                req = QgsFeatureRequest().setFilterRect(centroid.boundingBox())
+                req = QgsFeatureRequest().setFilterRect(punt.boundingBox())
                 for z in lz.getFeatures(req):
-                    if z.geometry().contains(centroid):
+                    if z.geometry().contains(punt):
                         pol_val = _get_field_value(z, "label", "zoningid")
                         break
                 if pol_val:

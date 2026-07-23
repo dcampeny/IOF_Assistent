@@ -31,6 +31,15 @@ from .iof_taules import FORMACIONS, USOS_VEGETACIO, is_forestal, is_arbrat
 LAYERS_UNITATS = ["IOF_Unitats_Actuacio", "IOF_Rodals"]
 
 
+def _sense_accents(text):
+    """Retorna el text en minúscules i sense accents, per fer
+    comparacions de cerca insensibles a accents (p. ex. "platan" ha de
+    trobar "plàtan")."""
+    import unicodedata
+    text = unicodedata.normalize("NFD", text.lower())
+    return "".join(c for c in text if unicodedata.category(c) != "Mn")
+
+
 class RodalsWizard(QDialog):
 
     def __init__(self, iface):
@@ -82,7 +91,7 @@ class RodalsWizard(QDialog):
         main = QVBoxLayout(self)
         main.setSpacing(12)
 
-        title = QLabel("<b>Omplir camps de les unitats de vegetació</b>")
+        title = QLabel("<b>Omplir camps de les tipologies forestals</b>")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title.setStyleSheet(
             "padding:8px; background:#e8f4e8; border-radius:4px; font-weight:bold;"
@@ -115,7 +124,7 @@ class RodalsWizard(QDialog):
         form.setHorizontalSpacing(12)
 
         # Checkbox "no ordenada" — fila 0, amplada total
-        self._chk_no_ordenat = QCheckBox("Unitat de vegetació / ús no ordenada")
+        self._chk_no_ordenat = QCheckBox("Tipologia forestal / ús no ordenada")
         self._chk_no_ordenat.setStyleSheet(
             "QCheckBox { font-weight:bold; color:#b71c1c; padding:4px; }"
             "QCheckBox::indicator { width:16px; height:16px; }"
@@ -334,7 +343,7 @@ class RodalsWizard(QDialog):
 
         # Avís de selecció al mapa
         self._lbl_map_hint = QLabel(
-            "🖱 Fes clic al mapa per seleccionar una unitat de vegetació / d'ús"
+            "🖱 Fes clic al mapa per seleccionar una tipologia forestal / d'ús"
         )
         self._lbl_map_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._lbl_map_hint.setStyleSheet(
@@ -349,16 +358,16 @@ class RodalsWizard(QDialog):
     # ------------------------------------------------------------------
 
     def _filter_formacio(self, text):
-        text = text.lower().strip()
+        text = _sense_accents(text.strip())
         for i in range(self._list_formacio.count()):
             item = self._list_formacio.item(i)
-            item.setHidden(bool(text) and text not in item.text().lower())
+            item.setHidden(bool(text) and text not in _sense_accents(item.text()))
 
     def _filter_us(self, text):
-        text = text.lower().strip()
+        text = _sense_accents(text.strip())
         for i in range(self._list_us.count()):
             item = self._list_us.item(i)
-            item.setHidden(bool(text) and text not in item.text().lower())
+            item.setHidden(bool(text) and text not in _sense_accents(item.text()))
 
     def _on_formacio_selected(self, item):
         if item:
@@ -541,7 +550,7 @@ class RodalsWizard(QDialog):
             QMessageBox.information(
                 self, "Capa buida",
                 "La capa d'unitats no conté cap polígon.\n"
-                "Digitalitza les unitats de vegetació primer."
+                "Digitalitza les tipologies forestals primer."
             )
             self._cancelled = True
             self.reject()
@@ -549,7 +558,7 @@ class RodalsWizard(QDialog):
 
         self._features = all_feats
 
-        # Comprova que TOTES les finques ja tinguin unitats de vegetació
+        # Comprova que TOTES les finques ja tinguin tipologies forestals
         # completes; si n'hi ha alguna sense (p. ex. una finca afegida
         # després d'omplir les altres), avisa i cancel·la en lloc de
         # deixar omplir dades tenint una finca sense digitalitzar.
@@ -572,10 +581,10 @@ class RodalsWizard(QDialog):
                     noms = ", ".join(str(f.id()) for f in incompletes)
                 QMessageBox.information(
                     self, "Unitats incompletes",
-                    f"Hi ha finques sense unitats de vegetació completes: "
+                    f"Hi ha finques sense tipologies forestals completes: "
                     f"{noms}.\n\n"
                     "Digitalitza primer les unitats que falten "
-                    "(Digitalitzar → Digitalitzar unitats de vegetació) "
+                    "(Digitalitzar → Digitalitzar tipologies forestals) "
                     "abans d'omplir les dades."
                 )
                 self._cancelled = True
@@ -838,7 +847,18 @@ class RodalsWizard(QDialog):
 
         # Navegació
         self._btn_prev.setEnabled(idx > 0)
-        is_last = (idx == total - 1)
+        # "És l'última pendent" NO es determina per la posició a la
+        # llista interna (idx == total - 1): self._features no té cap
+        # ordre lògic garantit, ja que la navegació és per clic al
+        # mapa, no seqüencial. Si es feia servir la posició, en
+        # omplir les unitats en un ordre diferent de l'intern podia
+        # sortir el botó "Finalitzar" (i tancar l'assistent donant-lo
+        # per acabat) tot i quedar unitats sense definir. Ara només és
+        # "última" si TOTES LES ALTRES unitats ja tenen dades desades.
+        altres_pendents = any(
+            not self._feat_te_dades(f) for i, f in enumerate(self._features) if i != idx
+        )
+        is_last = not altres_pendents
         self._btn_next.setVisible(not is_last)
         self._btn_finish.setVisible(is_last)
         self._loading_feature = False  # Ara l'usuari pot modificar camps
@@ -1037,7 +1057,12 @@ class RodalsWizard(QDialog):
         self._btn_next.setEnabled(False)
         self._btn_finish.setEnabled(False)
         self._form_modified = False
-        if self._current < len(self._features) - 1:
+        # Mateix criteri que a _show_feature: si queda alguna unitat
+        # sense dades (en qualsevol posició, no només després de
+        # l'actual a la llista interna), cal reactivar la selecció al
+        # mapa perquè l'usuari en pugui triar una altra.
+        falten = any(not self._feat_te_dades(f) for f in self._features)
+        if falten:
             self._activate_map_select()
 
     def _finish(self):
@@ -1045,6 +1070,25 @@ class RodalsWizard(QDialog):
             return
         self._deactivate_map_select()
         self._save_current()
+
+        # Comprovació defensiva: encara que el botó "Finalitzar" ja
+        # només s'hauria de mostrar quan no queda cap altra unitat
+        # pendent, es torna a comprovar aquí abans de tancar
+        # l'assistent -- per si de cas queda alguna unitat sense
+        # dades, s'avisa en lloc de donar per acabat silenciosament.
+        pendents = [
+            f for f in self._features if not self._feat_te_dades(f)
+        ]
+        if pendents:
+            QMessageBox.warning(
+                self, "Encara falten unitats",
+                f"Encara queden {len(pendents)} "
+                f"{'tipologies forestals' if len(pendents) != 1 else 'tipologia forestal'} "
+                "sense definir. Fes clic al mapa per continuar-les omplint."
+            )
+            self._update_progress()
+            self._activate_map_select()
+            return
 
         self._clear_highlight()
         had_saved_labeling = self._saved_labeling is not None
@@ -1058,8 +1102,8 @@ class RodalsWizard(QDialog):
         suma = sum(self._area_neta(f) for f in self._features
                    if f.id() not in self._no_ordenats)
         msg = (
-            f"S'han desat les dades de {n} unitat{'s' if n != 1 else ''} "
-            f"de vegetació.\n\n"
+            f"S'han desat les dades de {n} "
+            f"{'tipologies forestals' if n != 1 else 'tipologia forestal'}.\n\n"
             f"Superfície ordenada total: {suma:.2f} ha"
         )
         if no_ord:
@@ -1188,34 +1232,34 @@ class RodalsWizard(QDialog):
             return
         self._form_modified = True
 
+    def _feat_te_dades(self, feat):
+        """Retorna True si la unitat ja té les dades desades a la capa
+        (llegides en directe de la capa, no de la còpia a
+        self._features, que pot estar desactualitzada)."""
+        from qgis.core import QgsFeatureRequest
+        f = next(self._layer.getFeatures(
+            QgsFeatureRequest().setFilterFid(feat.id())), None)
+        if not f:
+            return False
+        fields = self._layer.fields().names()
+        if "sup_ord" in fields:
+            # sup_ord s'escriu sempre en desar (fins i tot val 0.0),
+            # però NULL significa que mai s'ha desat
+            val = f["sup_ord"]
+            return val is not None and str(val).strip() not in ("", "NULL")
+        # Fallback si la capa no té sup_ord
+        codi = f[self._codi_field]
+        us_val = f["codi_us"] if "codi_us" in fields else None
+        for_val = f["for_forestal"] if "for_forestal" in fields else None
+        te_codi = codi is not None and str(codi).strip() not in ("", "NULL")
+        te_us = us_val is not None and str(us_val).strip() not in ("", "NULL")
+        te_for = for_val is not None and str(for_val).strip() not in ("", "NULL")
+        return te_codi or te_us or te_for
+
     def _update_progress(self):
         """Actualitza la barra de progrés comptant les unitats desades."""
-        from qgis.core import QgsFeatureRequest
         total = len(self._features)
-        n_desades = 0
-        fields = self._layer.fields().names()
-        te_sup_ord = "sup_ord" in fields
-        for feat in self._features:
-            f = next(self._layer.getFeatures(
-                QgsFeatureRequest().setFilterFid(feat.id())), None)
-            if not f:
-                continue
-            if te_sup_ord:
-                # sup_ord s'escriu sempre en desar (fins i tot val 0.0),
-                # però NULL significa que mai s'ha desat
-                val = f["sup_ord"]
-                if val is not None and str(val).strip() not in ("", "NULL"):
-                    n_desades += 1
-            else:
-                # Fallback si la capa no té sup_ord
-                codi = f[self._codi_field]
-                us_val = f["codi_us"] if "codi_us" in fields else None
-                for_val = f["for_forestal"] if "for_forestal" in fields else None
-                te_codi = codi is not None and str(codi).strip() not in ("", "NULL")
-                te_us = us_val is not None and str(us_val).strip() not in ("", "NULL")
-                te_for = for_val is not None and str(for_val).strip() not in ("", "NULL")
-                if te_codi or te_us or te_for:
-                    n_desades += 1
+        n_desades = sum(1 for feat in self._features if self._feat_te_dades(feat))
         self._progress.setMaximum(total)
         self._progress.setValue(n_desades)
         if n_desades >= total:
@@ -1225,7 +1269,7 @@ class RodalsWizard(QDialog):
             )
         else:
             self._lbl_progress.setText(
-                f"{n_desades} de {total} unitats de vegetació / ús estan definides"
+                f"{n_desades} de {total} tipologies forestals / ús estan definides"
             )
 
     # ------------------------------------------------------------------

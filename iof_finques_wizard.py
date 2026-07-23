@@ -104,9 +104,16 @@ class FinquesWizard(QDialog):
         main.addWidget(self._lbl_progress)
 
         # Formulari
-        # Avís mode només lectura (ocult per defecte)
+        # Avís mode només lectura (ocult per defecte), amb botó per
+        # desbloquejar-lo manualment -- la detecció (tots els camps
+        # plens) també es dona quan les dades vénen de "Seleccionar
+        # parcel·les cadastrals" (on ja s'hi escriu un nom de finca),
+        # no només de l'àmbit IOF; cal poder desactivar-la si cal
+        # editar igualment.
+        from qgis.PyQt.QtWidgets import QHBoxLayout as _QHBoxLayout, QPushButton as _QPushButton
         self._lbl_read_only = QLabel(
-            "🔒 Dades carregades des de l'àmbit IOF — només lectura."
+            "🔒 Dades ja completes (p. ex. carregades des de l'àmbit IOF "
+            "o de la selecció de parcel·les cadastrals) — només lectura."
         )
         self._lbl_read_only.setStyleSheet(
             "background:#fff3cd; color:#856404; padding:6px; "
@@ -114,7 +121,13 @@ class FinquesWizard(QDialog):
         )
         self._lbl_read_only.setWordWrap(True)
         self._lbl_read_only.setVisible(False)
-        main.addWidget(self._lbl_read_only)
+        self._btn_unlock = _QPushButton("🔓 Edita igualment")
+        self._btn_unlock.setVisible(False)
+        self._btn_unlock.clicked.connect(self._unlock_read_only)
+        row_read_only = _QHBoxLayout()
+        row_read_only.addWidget(self._lbl_read_only, 1)
+        row_read_only.addWidget(self._btn_unlock)
+        main.addLayout(row_read_only)
 
         form_group = QGroupBox("Dades de la finca")
         form = QGridLayout(form_group)
@@ -476,6 +489,17 @@ class FinquesWizard(QDialog):
             self._list_municipis.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self._btn_save.setVisible(not read_only)
         self._lbl_read_only.setVisible(read_only)
+        self._btn_unlock.setVisible(read_only)
+
+    def _unlock_read_only(self):
+        """Desbloqueja manualment el mode només lectura (botó "Edita
+        igualment"), per als casos en què la detecció automàtica -- tots
+        els camps ja plens -- s'ha activat per unes dades que sí que cal
+        poder editar (p. ex. vingudes de "Seleccionar parcel·les
+        cadastrals", on ja s'hi escriu un nom de finca, no només de
+        l'àmbit IOF)."""
+        self._read_only = False
+        self._set_read_only_mode(False)
 
     def _mark_changed(self):
         """Activa el boto Desar quan es fa algun canvi."""

@@ -365,7 +365,7 @@ COLORS_VEGETACIO = {
 
 def get_color_vegetacio(codi_for, codi_us=None):
     """
-    Retorna (R, G, B) per a una unitat de vegetació.
+    Retorna (R, G, B) per a una tipologia forestal.
     Prioritat: codi_us (si forestal) > codi_for > gris per defecte.
     """
     # Si hi ha codi d'ús forestal, té prioritat per al color
